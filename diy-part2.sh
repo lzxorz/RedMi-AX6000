@@ -249,7 +249,7 @@ chmod +x "${UCI_DEFAULTS_DIR}/99-custom-settings"
 # 3. 输出检查
 # --------------------------------------------------
 echo "检查生成文件..."
-test -x ${UCI_DEFAULTS_DIR}/99-custom-settings"
+test -x "${UCI_DEFAULTS_DIR}/99-custom-settings"
 
 echo ""
 echo "=================================================="
