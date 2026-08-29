@@ -48,9 +48,14 @@ add_config() {
     grep -qxF "$cfg" .config 2>/dev/null || echo "$cfg" >> .config
 }
 
+package_exists() {
+    local package="$1"
+
+    grep -Rqs --include='Makefile' "Package/${package}" package feeds 2>/dev/null
+}
+
 # Argon 
-if grep -Rqs 'Package/luci-theme-argon' package feeds 2>/dev/null; then 
-    
+if package_exists "luci-theme-argon"; then 
     add_config "CONFIG_PACKAGE_luci-theme-argon=y" 
     echo " + luci-theme-argon" 
 else 
@@ -58,7 +63,7 @@ else
 fi
 
 # LuCI 中文 
-if grep -Rqs 'Package/luci-i18n-base-zh-cn' package feeds 2>/dev/null; then 
+if package_exists "luci-i18n-base-zh-cn"; then 
 	add_config "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" 
 	echo " + luci-i18n-base-zh-cn" 
 else 
@@ -66,11 +71,19 @@ else
 fi
 
 # BBR
-if grep -Rqs 'Package/kmod-tcp-bbr' package feeds 2>/dev/null; then 
+if package_exists "kmod-tcp-bbr"; then 
     add_config "CONFIG_PACKAGE_kmod-tcp-bbr=y"
     echo "  + kmod-tcp-bbr"
 else
     echo "  - kmod-tcp-bbr 未找到，跳过"
+fi
+
+# fq 所需的调度器内核模块
+if package_exists "kmod-sched-core"; then
+    add_config "CONFIG_PACKAGE_kmod-sched-core=y"
+    echo "  + kmod-sched-core"
+else
+    echo "  - kmod-sched-core 未找到，跳过"
 fi
 
 # 使用 ImmortalWrt/OpenWrt 标准方式重新解析依赖。 
@@ -81,16 +94,20 @@ make defconfig
 # --------------------------------------------------
 echo "创建首次启动配置..."
 
-mkdir -p package/base-files/files/etc/uci-defaults
-mkdir -p package/base-files/files/etc/sysctl.d
-mkdir -p package/base-files/files/etc/modules.d
+UCI_DEFAULTS_DIR="package/base-files/files/etc/uci-defaults"
+SYSCTL_DIR="package/base-files/files/etc/sysctl.d"
 
-cat <<'FIRSTBOOT' > package/base-files/files/etc/uci-defaults/99-custom-settings
+mkdir -p "$UCI_DEFAULTS_DIR"
+mkdir -p "$SYSCTL_DIR"
+
+cat <<'FIRSTBOOT' > "${UCI_DEFAULTS_DIR}/99-custom-settings"
 
 #!/bin/sh
 #
 # Redmi AX6000 ImmortalWrt 首次启动配置
 #
+
+set -e
 
 # ================================================== 
 # 基础系统 
@@ -107,6 +124,7 @@ uci commit system
 find_radio_by_band() {
     local target_band="$1"
     local radio 
+	
     for radio in $(uci -q show wireless 2>/dev/null | 
         sed -n "s/^wireless\.\([^=]*\)=wifi-device$/\1/p"); do 
         if [ "$(uci -q get "wireless.${radio}.band" 2>/dev/null)" = "$target_band" ]; then 
@@ -242,7 +260,8 @@ if command -v sysctl >/dev/null 2>&1; then
         BBR_AVAILABLE=1
     fi
 
-    if sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then
+    # fq
+	if sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then
         FQ_AVAILABLE=1
     fi
 
@@ -262,8 +281,6 @@ if command -v sysctl >/dev/null 2>&1; then
         else
             echo " fq : unavailable"
         fi
-
-        sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
     
     else
         echo " BBR: unavailable"
@@ -282,9 +299,6 @@ if uci -q show firewall.@defaults[0] >/dev/null 2>&1; then
     uci commit firewall
 
     echo " Flow Offloading: software"
-
-    # 立即应用防火墙配置。 
-    /etc/init.d/firewall restart >/dev/null 2>&1 || true
 fi
 
 # ==================================================
@@ -304,13 +318,13 @@ echo "Redmi AX6000 首次启动配置完成。"
 exit 0
 FIRSTBOOT
 
-chmod +x package/base-files/files/etc/uci-defaults/99-custom-settings
+chmod +x "${UCI_DEFAULTS_DIR}/99-custom-settings"
 
 # --------------------------------------------------
 # 3. 输出检查
 # --------------------------------------------------
 echo "检查生成文件..."
-test -x package/base-files/files/etc/uci-defaults/99-custom-settings
+test -x ${UCI_DEFAULTS_DIR}/99-custom-settings"
 
 echo ""
 echo "=================================================="
