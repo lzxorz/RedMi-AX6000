@@ -1,20 +1,20 @@
 #!/bin/bash
 #
 # diy-part2.sh
-# Redmi AX6000 ImmortalWrt DIY 配置
+# Redmi AX6000 ImmortalWrt(https://github.com/immortalwrt/immortalwrt) DIY 配置
 #
 # 在 feeds update/install 完成后执行。
 #
 # 主要功能：
-#   1. 主机名 / Argon
-#   2. BBR + fq + TCP Buffer
-#   3. 2.4G / 5G WiFi 稳定参数
-#   4. 强制 CN 国家码
-#   5. 5G 默认 HE80 + 非 DFS 高频信道
-#   6. Ethernet 自动协商，不手动锁 2.5G 速率
-#   7. 软件/硬件 Flow Offloading
-#   8. 中文 LuCI + 上海时区
-#   9. Tailscale UDP 41641 + 社区软件源
+#   主机名 / Argon
+#   BBR + fq + TCP Buffer
+#   2.4G / 5G WiFi 稳定参数
+#   强制 CN 国家码
+#   5G 默认 HE80 + 非 DFS 高频信道
+#   Ethernet 自动协商，不手动锁 2.5G 速率
+#   软件/硬件 Flow Offloading
+#   中文 LuCI + 上海时区
+#   Tailscale UDP 41641 + 社区软件源
 #
 # 重要：
 #   - radio0/radio1 不硬编码，通过 band=2g/5g 自动识别。
@@ -31,7 +31,7 @@ echo "=================================================="
 # --------------------------------------------------
 # 1. 基础设置
 # --------------------------------------------------
-echo "[1/7] 配置 主机名 / Argon..."
+echo "[1/6] 配置 主机名 / Argon..."
 
 if [ -f package/base-files/files/bin/config_generate ]; then
     sed -i 's/ImmortalWrt/Redmi-AX6000/g' package/base-files/files/bin/config_generate
@@ -44,23 +44,23 @@ fi
 # --------------------------------------------------
 # 2. 编译时加入需要的软件包
 # --------------------------------------------------
-echo "[2/7] 配置 BBR / ethtool..."
+echo "[2/6] 配置 BBR / ethtool..."
 
 add_config() {
     local cfg="$1"
     grep -qxF "$cfg" .config 2>/dev/null || echo "$cfg" >> .config
 }
 
-if grep -Rqs 'config PACKAGE_kmod-tcp-bbr' package/ 2>/dev/null ||
-   grep -Rqs 'Package/kmod-tcp-bbr' package/ 2>/dev/null; then
+if grep -Rqs 'config PACKAGE_kmod-tcp-bbr' package feeds/packages 2>/dev/null ||
+   grep -Rqs 'Package/kmod-tcp-bbr' package feeds/packages 2>/dev/null; then
     add_config "CONFIG_PACKAGE_kmod-tcp-bbr=y"
     echo "  + kmod-tcp-bbr"
 else
     echo "  - kmod-tcp-bbr 未找到，跳过"
 fi
 
-if grep -Rqs 'config PACKAGE_ethtool' package/ 2>/dev/null ||
-   grep -Rqs 'Package/ethtool' package/ 2>/dev/null; then
+if grep -Rqs 'config PACKAGE_ethtool' package feeds/packages 2>/dev/null ||
+   grep -Rqs 'Package/ethtool' package feeds/packages 2>/dev/null; then
     add_config "CONFIG_PACKAGE_ethtool=y"
     echo "  + ethtool"
 else
@@ -72,7 +72,7 @@ fi
 # --------------------------------------------------
 # 3. 创建首次启动配置
 # --------------------------------------------------
-echo "[3/7] 创建首次启动配置..."
+echo "[3/6] 创建首次启动配置..."
 
 mkdir -p package/base-files/files/etc/uci-defaults
 
@@ -138,10 +138,6 @@ if [ -n "$RADIO_2G" ]; then
     uci set "${RADIO}.txpower=23"
     uci set "${RADIO}.disabled=0"
 
-    # 驱动支持时启用 MU-MIMO / Beamforming；不支持则忽略。
-    uci set "${RADIO}.mu_beamformer=1" 2>/dev/null || true
-    uci set "${RADIO}.mu_beamformee=1" 2>/dev/null || true
-
     IFACE_2G="wireless.default_${RADIO_2G}"
     if uci -q get "${IFACE_2G}.ssid" >/dev/null 2>&1; then
         # 802.11k：邻居报告。
@@ -149,11 +145,9 @@ if [ -n "$RADIO_2G" ]; then
 
         # 802.11v：BSS Transition。
         uci set "${IFACE_2G}.bss_transition=1"
-
-        # 不启用 WNM Sleep Mode；该选项不是“开启 802.11v”的开关。
-        uci set "${IFACE_2G}.wnm_sleep_mode=0" 2>/dev/null || true
-
+        
         # 关闭 U-APSD。
+        # 部分老旧/兼容性较差的终端关闭后更稳定。
         uci set "${IFACE_2G}.uapsd=0"
     fi
 
@@ -171,9 +165,14 @@ if [ -n "$RADIO_5G" ]; then
 
     # 稳定性优先：默认 HE80，不默认 HE160。
     uci set "${RADIO}.htmode=HE80"
-
-    # 默认 149；可改成 153 / 157 / 161 / 165。
-    # 这些为本脚本的目标非 DFS 高频段，实际可用性仍由 CN 监管域和驱动决定。
+    
+    # 5G 使用非 DFS 高频段。
+    # 默认 149，优先保证稳定性。
+    #
+    # 注意：
+    # HE80 下不要把 149/153/157/161/165 简单理解成
+    # 五个都可以直接作为 80MHz 主信道。
+    # 实际可用信道由国家码、驱动和当前频宽共同决定。
     uci set "${RADIO}.channel=149"
 
     uci set "${RADIO}.txpower=23"
@@ -194,8 +193,9 @@ if [ -n "$RADIO_5G" ]; then
         # 802.11k / 802.11v。
         uci set "${IFACE_5G}.ieee80211k=1"
         uci set "${IFACE_5G}.bss_transition=1"
-
-        # 关闭 U-APSD / WMM-APSD。
+        
+        # 关闭 U-APSD。
+        # 部分老旧/兼容性较差的终端关闭后更稳定。
         uci set "${IFACE_5G}.uapsd=0"
     fi
 
@@ -257,7 +257,24 @@ add_sysctl() {
     fi
 }
 
-add_sysctl 'net.ipv4.tcp_congestion_control' 'bbr'
+
+R_AVAILABLE=0
+
+if command -v modprobe >/dev/null 2>&1; then
+    modprobe tcp_bbr 2>/dev/null || true
+fi
+
+if sysctl net.ipv4.tcp_allowed_congestion_control 2>/dev/null |
+    grep -qw bbr; then
+    
+    BBR_AVAILABLE=1
+    sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
+fi
+
+if [ "$BBR_AVAILABLE" = "1" ]; then
+    add_sysctl 'net.ipv4.tcp_congestion_control' 'bbr'
+fi
+
 add_sysctl 'net.core.default_qdisc' 'fq'
 add_sysctl 'net.core.rmem_max' '16777216'
 add_sysctl 'net.core.wmem_max' '16777216'
@@ -267,7 +284,7 @@ add_sysctl 'net.ipv4.tcp_wmem' '4096 65536 16777216'
 # ==================================================
 # 5. Flow Offloading
 # ==================================================
-if uci -q get firewall.@defaults[0] >/dev/null 2>&1; then
+if uci -q show firewall.@defaults[0] >/dev/null 2>&1; then
     uci set firewall.@defaults[0].flow_offloading=1
     uci set firewall.@defaults[0].flow_offloading_hw=1
     uci commit firewall
@@ -329,24 +346,28 @@ FIRSTBOOT
 
 chmod +x package/base-files/files/etc/uci-defaults/99-custom-settings
 
+
 # --------------------------------------------------
 # 4. Ethernet 自动协商
 # --------------------------------------------------
-echo "[4/7] 创建 Ethernet 自动协商 hotplug..."
+echo "[4/6] 创建 Ethernet 自动协商 hotplug..."
 
 mkdir -p package/base-files/files/etc/hotplug.d/net
 
 cat <<'EOF' > package/base-files/files/etc/hotplug.d/net/99-ax6000-autoneg
 #!/bin/sh
+
+# Redmi AX6000：
+# 不手动锁定 100M / 1G / 2.5G。
+# 网卡支持什么速率，就让双方自动协商。
 #
-# Redmi AX6000 Ethernet Auto Negotiation
-# 不锁 100M / 1G / 2.5G，始终尝试开启 Auto Negotiation。
-#
+# 注意：
+# 这里只打开 autoneg，
+# 不设置 speed / duplex，避免人为锁速率。
 
 command -v ethtool >/dev/null 2>&1 || exit 0
 [ -n "$INTERFACE" ] || exit 0
 
-# 只处理 eth* 物理/主控网口，不处理 br-lan / lo / wlan。
 case "$INTERFACE" in
     eth*)
         ethtool -s "$INTERFACE" autoneg on >/dev/null 2>&1 || true
@@ -358,17 +379,18 @@ EOF
 
 chmod +x package/base-files/files/etc/hotplug.d/net/99-ax6000-autoneg
 
+
 # --------------------------------------------------
 # 5. 输出检查
 # --------------------------------------------------
-echo "[5/7] 检查生成文件..."
+echo "[5/6] 检查生成文件..."
 test -x package/base-files/files/etc/uci-defaults/99-custom-settings
 test -x package/base-files/files/etc/hotplug.d/net/99-ax6000-autoneg
 
 # --------------------------------------------------
 # 6. 配置摘要
 # --------------------------------------------------
-echo "[6/7] 配置摘要..."
+echo "[6/6] 配置摘要..."
 echo "  Hostname        : Redmi-AX6000"
 echo "  LuCI             : Argon + 中文"
 echo "  Timezone         : Asia/Shanghai"
@@ -376,8 +398,7 @@ echo "  WiFi country     : CN"
 echo "  2.4G             : HE40 / Auto / 23dBm / 11k/v"
 echo "  5G               : HE80 / 149 / 23dBm / 11k/v"
 echo "  5G DFS           : 默认避开"
-echo "  WMM-APSD/U-APSD  : 关闭"
-echo "  Ethernet         : Auto Negotiation"
+echo "  U-APSD  : 关闭"
 echo "  BBR + fq         : 可用时启用"
 echo "  TCP Buffer       : 16 MiB"
 echo "  Flow Offloading  : SW + HW"
