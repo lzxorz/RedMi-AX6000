@@ -12,17 +12,23 @@
 # - Asia/Shanghai 
 # - 2.4G HE40 / Auto 
 # - 5G HE80 / 149 
-# - 11k / 11v 
+# - 802.11k / 802.11v 
 # - U-APSD off 
 # - BBR + fq（内核支持时） 
 # - Software Flow Offloading 
 #
-# 重要：
+# 设计原则：
 #   - radio0/radio1 不硬编码，通过 band=2g/5g 自动识别。
 #   - 不修改不确定的内核 / 网络参数
 #   - 首次启动配置保持幂等
-#   - uci set 统一使用：uci set "${SECTION}.option=value"
-#     不要写成：uci set "${SECTION}.option='value'"
+# - 编译期只加入明确需要的软件包
+#
+# 注意： 
+# - country=CN 必须与设备实际使用地区一致 
+# - UCI set 统一使用： 
+#     uci set "${SECTION}.option=value" 
+# - 不写成： 
+#     uci set "${SECTION}.option='value'"
 #
 
 set -e
@@ -36,6 +42,7 @@ echo "=================================================="
 # --------------------------------------------------
 echo "[1/5] 配置主机名 / Argon..."
 
+# 默认主机名
 if [ -f package/base-files/files/bin/config_generate ]; then
     sed -i 's/ImmortalWrt/Redmi-AX6000/g' package/base-files/files/bin/config_generate
 fi
@@ -47,15 +54,26 @@ fi
 # --------------------------------------------------
 # 2. 编译时加入需要的软件包
 # --------------------------------------------------
-echo "[2/5] 配置 BBR ..."
+echo "[2/5] 配置软件包 / BBR..."
 
 add_config() {
     local cfg="$1"
     grep -qxF "$cfg" .config 2>/dev/null || echo "$cfg" >> .config
 }
 
-if grep -Rqs 'config PACKAGE_kmod-tcp-bbr' package feeds/packages 2>/dev/null ||
-   grep -Rqs 'Package/kmod-tcp-bbr' package feeds/packages 2>/dev/null; then
+# Argon 
+if grep -Rqs 'Package/luci-theme-argon' package feeds 2>/dev/null; then 
+    
+    add_config "CONFIG_PACKAGE_luci-theme-argon=y" 
+    echo " + luci-theme-argon" 
+else 
+    echo " - luci-theme-argon 未找到，跳过" 
+fi
+
+# BBR
+if grep -Rqs 'config PACKAGE_kmod-tcp-bbr' package feeds 2>/dev/null ||
+   grep -Rqs 'Package/kmod-tcp-bbr' package feeds 2>/dev/null; then
+    
     add_config "CONFIG_PACKAGE_kmod-tcp-bbr=y"
     echo "  + kmod-tcp-bbr"
 else
@@ -72,8 +90,20 @@ echo "[3/5] 创建首次启动配置..."
 
 mkdir -p package/base-files/files/etc/uci-defaults
 mkdir -p package/base-files/files/etc/sysctl.d
+mkdir -p package/base-files/files/etc/modules.d
 
+# -------------------------------------------------- 
+# BBR：启动时尝试加载模块 
+# -------------------------------------------------- 
+cat <<'EOF' > package/base-files/files/etc/modules.d/99-bbr 
+tcp_bbr 
+EOF
+
+# -------------------------------------------------- 
+# 首次启动配置 
+# --------------------------------------------------
 cat <<'FIRSTBOOT' > package/base-files/files/etc/uci-defaults/99-custom-settings
+
 #!/bin/sh
 #
 # Redmi AX6000 / ImmortalWrt 首次启动配置
@@ -85,7 +115,8 @@ cat <<'FIRSTBOOT' > package/base-files/files/etc/uci-defaults/99-custom-settings
 find_radio_by_band() {
     local target_band="$1"
     local radio 
-    for radio in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^=]*\)=wifi-device$/\1/p"); do 
+    for radio in $(uci -q show wireless 2>/dev/null | 
+        sed -n "s/^wireless\.\([^=]*\)=wifi-device$/\1/p"); do 
         if [ "$(uci -q get "wireless.${radio}.band" 2>/dev/null)" = "$target_band" ]; then 
             echo "$radio" 
             return 0 
@@ -95,19 +126,38 @@ find_radio_by_band() {
     return 1
 }
 
-RADIO_2G="$(find_radio_by_band 2g || true)"
-RADIO_5G="$(find_radio_by_band 5g || true)"
+find_iface_by_device() { 
+    local device="$1" 
+    local iface 
+    local iface_device 
+    
+    for iface in $(uci -q show wireless 2>/dev/null | 
+        sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do 
+        
+        iface_device="$(uci -q get "wireless.${iface}.device" 2>/dev/null || true)" 
+        
+        if [ "$iface_device" = "$device" ]; then 
+            echo "$iface" 
+            return 0 
+        fi 
+    done 
+    
+    return 1 
+}
 
-echo "WiFi radio:"
-echo "  2.4G = ${RADIO_2G:-未找到}"
-echo "  5G   = ${RADIO_5G:-未找到}"
+RADIO_2G="$(find_radio_by_band 2g || true)" 
+RADIO_5G="$(find_radio_by_band 5g || true)" 
+
+echo "WiFi radio:" 
+echo " 2.4G = ${RADIO_2G:-未找到}" 
+echo " 5G = ${RADIO_5G:-未找到}"
 
 # ==================================================
 # 2.4G
 # ==================================================
 if [ -n "$RADIO_2G" ]; then
     RADIO="wireless.${RADIO_2G}"
-    IFACE_2G="wireless.default_${RADIO_2G}"
+    IFACE_2G="$(find_iface_by_device "$RADIO_2G" || true)"
 
     # 监管域必须与设备实际使用地区一致。
     uci set "${RADIO}.country=CN"
@@ -122,14 +172,21 @@ if [ -n "$RADIO_2G" ]; then
     uci set "${RADIO}.txpower=23"
     uci set "${RADIO}.disabled=0"
     
-    if uci -q get "${IFACE_2G}.ssid" >/dev/null 2>&1; then
+    if [ -n "$IFACE_2G" ]; then
+        IFACE="wireless.${IFACE_2G}"
+        
         # 802.11k / 802.11v。
-        uci set "${IFACE_2G}.ieee80211k=1"
-        uci set "${IFACE_2G}.bss_transition=1"
+        uci set "${IFACE}.ieee80211k=1"
+        uci set "${IFACE}.bss_transition=1"
         
         # 关闭 U-APSD。
         # 部分老旧/兼容性较差的终端关闭后更稳定。
-        uci set "${IFACE_2G}.uapsd=0"
+        uci set "${IFACE}.uapsd=0"
+
+        # SSID / 加密 
+        uci set "${IFACE}.ssid=Tenda-nls" 
+        uci set "${IFACE}.encryption=psk2+ccmp" 
+        uci set "${IFACE}.key=2022@056700"
     fi
 
     echo "  2.4G: CN / HE40 / Auto / 23dBm / 11k/v / U-APSD off"
@@ -140,7 +197,7 @@ fi
 # ==================================================
 if [ -n "$RADIO_5G" ]; then
     RADIO="wireless.${RADIO_5G}"
-    IFACE_5G="wireless.default_${RADIO_5G}"
+    IFACE_5G="$(find_iface_by_device "$RADIO_5G" || true)"
     
     # 监管域必须与设备实际使用地区一致。
     uci set "${RADIO}.country=CN"
@@ -154,40 +211,30 @@ if [ -n "$RADIO_5G" ]; then
     uci set "${RADIO}.txpower=23"
     uci set "${RADIO}.disabled=0"
 
-    if uci -q get "${IFACE_5G}.ssid" >/dev/null 2>&1; then
+    if [ -n "$IFACE_5G" ]; then
+        IFACE="wireless.${IFACE_5G}"
+        
         # 802.11k / 802.11v。
-        uci set "${IFACE_5G}.ieee80211k=1"
-        uci set "${IFACE_5G}.bss_transition=1"
+        uci set "${IFACE}.ieee80211k=1"
+        uci set "${IFACE}.bss_transition=1"
         
         # 关闭 U-APSD。
         # 部分老旧/兼容性较差的终端关闭后更稳定。
-        uci set "${IFACE_5G}.uapsd=0"
+        uci set "${IFACE}.uapsd=0"
+
+        # SSID / 加密 
+        uci set "${IFACE}.ssid=Tenda-nls_5G" 
+        uci set "${IFACE}.encryption=psk2+ccmp" 
+        uci set "${IFACE}.key=2022@056700"
     fi
 
     echo "  5G: CN / HE80 / ch149 / 23dBm / 11k/v / U-APSD off"
 fi
 
-# ==================================================
-# 3. SSID / 密码
-# ==================================================
-if [ -n "$RADIO_2G" ]; then
-    IFACE_2G="wireless.default_${RADIO_2G}"
-    uci set "${IFACE_2G}.ssid=Tenda-nls"
-    uci set "${IFACE_2G}.encryption=psk2+ccmp"
-    uci set "${IFACE_2G}.key=2022@056700"
-fi
-
-if [ -n "$RADIO_5G" ]; then
-    IFACE_5G="wireless.default_${RADIO_5G}"
-    uci set "${IFACE_5G}.ssid=Tenda-nls_5G"
-    uci set "${IFACE_5G}.encryption=psk2+ccmp"
-    uci set "${IFACE_5G}.key=2022@056700"
-fi
-
 uci commit wireless
 
 # ==================================================
-# 4. BBR + fq
+# 2. BBR + fq
 # ==================================================
 BBR_AVAILABLE=0
 
@@ -215,7 +262,7 @@ if command -v sysctl >/dev/null 2>&1; then
 fi
 
 # ==================================================
-# 5. Software Flow Offloading
+# 3. Software Flow Offloading
 # ==================================================
 if uci -q show firewall.@defaults[0] >/dev/null 2>&1; then
     uci set firewall.@defaults[0].flow_offloading=1
@@ -226,18 +273,29 @@ if uci -q show firewall.@defaults[0] >/dev/null 2>&1; then
 fi
 
 # ==================================================
-# 6. LuCI 中文 + 上海时区
+# 4. LuCI 中文 + 上海时区
 # ==================================================
 uci set luci.main.lang=zh_cn
+
+# 如果 Argon 已安装，则设置为默认主题 
+if [ -d /www/luci-static/argon ]; then 
+    uci set luci.main.mediaurlbase=/luci-static/argon 
+fi
+
+uci commit luci
+
 uci set system.@system[0].timezone=CST-8
 uci set system.@system[0].zonename=Asia/Shanghai
-uci commit luci
+
 uci commit system
 
 # ==================================================
 # 应用配置
 # ==================================================
-sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
+if [ -f /etc/sysctl.d/99-bbr.conf ]; then
+    sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
+fi
+
 /etc/init.d/network restart >/dev/null 2>&1 || true
 wifi reload >/dev/null 2>&1 || true
 
@@ -252,6 +310,7 @@ chmod +x package/base-files/files/etc/uci-defaults/99-custom-settings
 # --------------------------------------------------
 echo "[4/5] 检查生成文件..."
 test -x package/base-files/files/etc/uci-defaults/99-custom-settings
+test -f package/base-files/files/etc/modules.d/99-bbr
 
 # --------------------------------------------------
 # 5. 配置摘要
