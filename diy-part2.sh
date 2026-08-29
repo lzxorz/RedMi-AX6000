@@ -1,12 +1,26 @@
 #!/bin/bash
 #
-# Redmi AX6000 ImmortalWrt(https://github.com/immortalwrt/immortalwrt) DIY 配置
+# Redmi AX6000 ImmortalWrt DIY 配置
 #
 # 执行时机：
 #   feeds update/install 完成后，在 ImmortalWrt 源码根目录执行。
 #
+# 目标： 
+# - Redmi AX6000 
+# - Argon 
+# - 中文 LuCI 
+# - Asia/Shanghai 
+# - 2.4G HE40 / Auto 
+# - 5G HE80 / 149 
+# - 11k / 11v 
+# - U-APSD off 
+# - BBR + fq（内核支持时） 
+# - Software Flow Offloading 
+#
 # 重要：
 #   - radio0/radio1 不硬编码，通过 band=2g/5g 自动识别。
+#   - 不修改不确定的内核 / 网络参数
+#   - 首次启动配置保持幂等
 #   - uci set 统一使用：uci set "${SECTION}.option=value"
 #     不要写成：uci set "${SECTION}.option='value'"
 #
@@ -33,7 +47,7 @@ fi
 # --------------------------------------------------
 # 2. 编译时加入需要的软件包
 # --------------------------------------------------
-echo "[2/5] 配置 BBR / ethtool..."
+echo "[2/5] 配置 BBR ..."
 
 add_config() {
     local cfg="$1"
@@ -48,16 +62,8 @@ else
     echo "  - kmod-tcp-bbr 未找到，跳过"
 fi
 
-if grep -Rqs 'config PACKAGE_ethtool' package feeds/packages 2>/dev/null ||
-   grep -Rqs 'Package/ethtool' package feeds/packages 2>/dev/null; then
-    add_config "CONFIG_PACKAGE_ethtool=y"
-    echo "  + ethtool"
-else
-    echo "  - ethtool 未找到，跳过"
-fi
-
-# 让 OpenWrt 重新整理依赖关系；失败直接终止构建。
-./scripts/config/conf --defconfig=.config Config.in
+# 使用 ImmortalWrt/OpenWrt 标准方式重新解析依赖。 
+make defconfig
 
 # --------------------------------------------------
 # 3. 创建首次启动配置
@@ -65,6 +71,7 @@ fi
 echo "[3/5] 创建首次启动配置..."
 
 mkdir -p package/base-files/files/etc/uci-defaults
+mkdir -p package/base-files/files/etc/sysctl.d
 
 cat <<'FIRSTBOOT' > package/base-files/files/etc/uci-defaults/99-custom-settings
 #!/bin/sh
@@ -77,15 +84,14 @@ cat <<'FIRSTBOOT' > package/base-files/files/etc/uci-defaults/99-custom-settings
 # ==================================================
 find_radio_by_band() {
     local target_band="$1"
-    local radio band
-
-    for radio in radio0 radio1 radio2 radio3; do
-        band="$(uci -q get "wireless.${radio}.band" 2>/dev/null || true)"
-        if [ "$band" = "$target_band" ]; then
-            echo "$radio"
-            return 0
-        fi
+    local radio 
+    for radio in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^=]*\)=wifi-device$/\1/p"); do 
+        if [ "$(uci -q get "wireless.${radio}.band" 2>/dev/null)" = "$target_band" ]; then 
+            echo "$radio" 
+            return 0 
+        fi 
     done
+    
     return 1
 }
 
@@ -101,6 +107,7 @@ echo "  5G   = ${RADIO_5G:-未找到}"
 # ==================================================
 if [ -n "$RADIO_2G" ]; then
     RADIO="wireless.${RADIO_2G}"
+    IFACE_2G="wireless.default_${RADIO_2G}"
 
     # 监管域必须与设备实际使用地区一致。
     uci set "${RADIO}.country=CN"
@@ -114,8 +121,7 @@ if [ -n "$RADIO_2G" ]; then
     # 目标发射功率；实际值仍受国家码、硬件和驱动限制。
     uci set "${RADIO}.txpower=23"
     uci set "${RADIO}.disabled=0"
-
-    IFACE_2G="wireless.default_${RADIO_2G}"
+    
     if uci -q get "${IFACE_2G}.ssid" >/dev/null 2>&1; then
         # 802.11k / 802.11v。
         uci set "${IFACE_2G}.ieee80211k=1"
@@ -134,7 +140,8 @@ fi
 # ==================================================
 if [ -n "$RADIO_5G" ]; then
     RADIO="wireless.${RADIO_5G}"
-
+    IFACE_5G="wireless.default_${RADIO_5G}"
+    
     # 监管域必须与设备实际使用地区一致。
     uci set "${RADIO}.country=CN"
 
@@ -147,7 +154,6 @@ if [ -n "$RADIO_5G" ]; then
     uci set "${RADIO}.txpower=23"
     uci set "${RADIO}.disabled=0"
 
-    IFACE_5G="wireless.default_${RADIO_5G}"
     if uci -q get "${IFACE_5G}.ssid" >/dev/null 2>&1; then
         # 802.11k / 802.11v。
         uci set "${IFACE_5G}.ieee80211k=1"
@@ -190,44 +196,33 @@ if command -v sysctl >/dev/null 2>&1; then
         modprobe tcp_bbr 2>/dev/null || true
     fi
 
-    if sysctl net.ipv4.tcp_allowed_congestion_control 2>/dev/null |
-       grep -qw bbr; then
+    if sysctl net.ipv4.tcp_allowed_congestion_control 2>/dev/null | grep -qw bbr; then
         BBR_AVAILABLE=1
-        sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
+        
+        sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true 
+        
+        sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true 
+        
+        cat > /etc/sysctl.d/99-bbr.conf <<'EOF' 
+        net.ipv4.tcp_congestion_control=bbr 
+        net.core.default_qdisc=fq 
+        EOF
+        
         echo "  BBR: enabled"
     else
         echo "  BBR: unavailable"
     fi
-
-    sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
-fi
-
-SYSCTL_FILE='/etc/sysctl.conf'
-touch "$SYSCTL_FILE"
-
-add_sysctl() {
-    local key="$1"
-    local value="$2"
-
-    if grep -qE "^[[:space:]]*${key}=" "$SYSCTL_FILE" 2>/dev/null; then
-        sed -i "s|^[[:space:]]*${key}=.*|${key}=${value}|" "$SYSCTL_FILE"
-    else
-        echo "${key}=${value}" >> "$SYSCTL_FILE"
-    fi
-}
-
-if [ "$BBR_AVAILABLE" = "1" ]; then
-    add_sysctl 'net.ipv4.tcp_congestion_control' 'bbr'
-    add_sysctl 'net.core.default_qdisc' 'fq'
 fi
 
 # ==================================================
-# 5. Flow Offloading
+# 5. Software Flow Offloading
 # ==================================================
 if uci -q show firewall.@defaults[0] >/dev/null 2>&1; then
     uci set firewall.@defaults[0].flow_offloading=1
-    uci set firewall.@defaults[0].flow_offloading_hw=1
+    uci -q delete firewall.@defaults[0].flow_offloading_hw
     uci commit firewall
+
+    echo " Flow Offloading: software"
 fi
 
 # ==================================================
@@ -242,9 +237,9 @@ uci commit system
 # ==================================================
 # 应用配置
 # ==================================================
+sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
 /etc/init.d/network restart >/dev/null 2>&1 || true
 wifi reload >/dev/null 2>&1 || true
-sysctl -p /etc/sysctl.conf >/dev/null 2>&1 || true
 
 echo "Redmi AX6000 首次启动配置完成。"
 exit 0
@@ -268,9 +263,9 @@ echo "  Timezone         : Asia/Shanghai"
 echo "  WiFi country     : CN"
 echo "  2.4G             : HE40 / Auto / 23dBm / 11k/v"
 echo "  5G               : HE80 / 149 / 23dBm / 11k/v"
-echo "  U-APSD  : 关闭"
+echo "  U-APSD           : 关闭"
 echo "  BBR + fq         : 可用时启用"
-echo "  Flow Offloading  : SW + HW"
+echo "  Flow Offloading  : Software"
 
 echo ""
 echo "=================================================="
