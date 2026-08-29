@@ -14,7 +14,6 @@
 # - 5G HE80 / 149 
 # - 802.11k / 802.11v 
 # - U-APSD off 
-# - BBR + fq（内核支持时）
 # - Software Flow Offloading 
 #
 # 设计原则：
@@ -54,24 +53,10 @@ package_exists() {
     grep -Rqs --include='Makefile' "Package/${package}" package feeds 2>/dev/null
 }
 
-# BBR
-if package_exists "kmod-tcp-bbr"; then 
-    add_config "CONFIG_PACKAGE_kmod-tcp-bbr=y"
-    echo "  + kmod-tcp-bbr"
-else
-    echo "  - kmod-tcp-bbr 未找到，跳过"
-fi
 
-# fq 所需的调度器内核模块
-if package_exists "kmod-sched-core"; then
-    add_config "CONFIG_PACKAGE_kmod-sched-core=y"
-    echo "  + kmod-sched-core"
-else
-    echo "  - kmod-sched-core 未找到，跳过"
-fi
 
 # 使用 ImmortalWrt/OpenWrt 标准方式重新解析依赖。 
-make defconfig
+# make defconfig
 
 # --------------------------------------------------
 # 2. 创建首次启动配置
@@ -226,50 +211,6 @@ if [ -n "$RADIO_5G" ]; then
 fi
 
 uci commit wireless
-
-# ==================================================
-# BBR + fq
-# ==================================================
-BBR_AVAILABLE=0
-FQ_AVAILABLE=0
-
-if command -v sysctl >/dev/null 2>&1; then    
-    # 尝试加载 BBR。
-    if command -v modprobe >/dev/null 2>&1; then
-        modprobe tcp_bbr 2>/dev/null || true
-    fi
-
-    # BBR
-    if sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
-        BBR_AVAILABLE=1
-    fi
-
-    # fq
-	if sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then
-        FQ_AVAILABLE=1
-    fi
-
-    # 持久化
-    if [ "$BBR_AVAILABLE" = "1" ]; then
-        {
-            echo "net.ipv4.tcp_congestion_control=bbr"
-            if [ "$FQ_AVAILABLE" = "1" ]; then
-                echo "net.core.default_qdisc=fq"
-            fi
-        } > /etc/sysctl.d/99-bbr.conf
-
-        echo " BBR: enabled"
-
-        if [ "$FQ_AVAILABLE" = "1" ]; then
-            echo " fq : enabled"
-        else
-            echo " fq : unavailable"
-        fi
-    
-    else
-        echo " BBR: unavailable"
-    fi
-fi
 
 # ==================================================
 # Software Flow Offloading
