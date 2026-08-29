@@ -14,7 +14,7 @@
 # - 5G HE80 / 149 
 # - 802.11k / 802.11v 
 # - U-APSD off 
-# - BBR + fq（内核支持时） 
+# - BBR + fq（内核支持时）
 # - Software Flow Offloading 
 #
 # 设计原则：
@@ -23,7 +23,6 @@
 #   - 编译期只加入明确需要的软件包。
 #   - 首次启动配置保持幂等
 #   - 不修改不确定的内核 / 网络参数。 
-#   - 不主动启用硬件 Flow Offloading。
 #
 # 注意： 
 # - country=CN 必须与设备实际使用地区一致 
@@ -36,7 +35,7 @@
 set -e
 
 echo "=================================================="
-echo " Redmi AX6000 DIY configuration"
+echo " Redmi AX6000 ImmortalWrt DIY configuration"
 echo "=================================================="
 
 # --------------------------------------------------
@@ -67,8 +66,7 @@ else
 fi
 
 # BBR
-if grep -Rqs 'config PACKAGE_kmod-tcp-bbr' package feeds 2>/dev/null || grep -Rqs 'Package/kmod-tcp-bbr' package feeds 2>/dev/null; then
-    
+if grep -Rqs 'Package/kmod-tcp-bbr' package feeds 2>/dev/null; then 
     add_config "CONFIG_PACKAGE_kmod-tcp-bbr=y"
     echo "  + kmod-tcp-bbr"
 else
@@ -231,32 +229,21 @@ uci commit wireless
 # BBR + fq
 # ==================================================
 BBR_AVAILABLE=0
+FQ_AVAILABLE=0
 
-if command -v sysctl >/dev/null 2>&1; then
-    BBR_AVAILABLE=0 
-    FQ_AVAILABLE=0
-    
+if command -v sysctl >/dev/null 2>&1; then    
     # 尝试加载 BBR。
     if command -v modprobe >/dev/null 2>&1; then
         modprobe tcp_bbr 2>/dev/null || true
     fi
 
     # BBR
-    if sysctl net.ipv4.tcp_allowed_congestion_control 2>/dev/null | grep -qw bbr; then
+    if sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1; then
         BBR_AVAILABLE=1
-        
-        sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true 
     fi
 
-    if [ -e /sys/class/net/lo/queues/tx-0/tx_maxrate ] || grep -qw fq /proc/sys/net/core/default_qdisc 2>/dev/null || command -v tc >/dev/null 2>&1 && tc qdisc add dev lo root fq 2>/dev/null; then
+    if sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then
         FQ_AVAILABLE=1
-
-        # 清理测试 qdisc。
-        if command -v tc >/dev/null 2>&1; then
-            tc qdisc del dev lo root 2>/dev/null || true
-        fi
-
-        sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
     fi
 
     # 持久化
