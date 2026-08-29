@@ -54,22 +54,6 @@ package_exists() {
     grep -Rqs --include='Makefile' "Package/${package}" package feeds 2>/dev/null
 }
 
-# Argon 
-if package_exists "luci-theme-argon"; then 
-    add_config "CONFIG_PACKAGE_luci-theme-argon=y" 
-    echo " + luci-theme-argon" 
-else 
-    echo " - luci-theme-argon 未找到，跳过" 
-fi
-
-# LuCI 中文 
-if package_exists "luci-i18n-base-zh-cn"; then 
-	add_config "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" 
-	echo " + luci-i18n-base-zh-cn" 
-else 
-	echo " - luci-i18n-base-zh-cn 未找到，跳过" 
-fi
-
 # BBR
 if package_exists "kmod-tcp-bbr"; then 
     add_config "CONFIG_PACKAGE_kmod-tcp-bbr=y"
