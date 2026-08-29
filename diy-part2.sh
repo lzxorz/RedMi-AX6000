@@ -19,9 +19,11 @@
 #
 # 设计原则：
 #   - radio0/radio1 不硬编码，通过 band=2g/5g 自动识别。
-#   - 不修改不确定的内核 / 网络参数
+#   - 不修改 ImmortalWrt 核心源码默认配置
+#   - 编译期只加入明确需要的软件包。
 #   - 首次启动配置保持幂等
-# - 编译期只加入明确需要的软件包
+#   - 不修改不确定的内核 / 网络参数。 
+#   - 不主动启用硬件 Flow Offloading。
 #
 # 注意： 
 # - country=CN 必须与设备实际使用地区一致 
@@ -38,23 +40,9 @@ echo " Redmi AX6000 DIY configuration"
 echo "=================================================="
 
 # --------------------------------------------------
-# 1. 基础设置
+# 1. 编译时加入需要的软件包
 # --------------------------------------------------
-echo "[1/5] 配置主机名 / Argon..."
-
-# 默认主机名
-if [ -f package/base-files/files/bin/config_generate ]; then
-    sed -i 's/ImmortalWrt/Redmi-AX6000/g' package/base-files/files/bin/config_generate
-fi
-
-if [ -f feeds/luci/collections/luci/Makefile ]; then
-    sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile
-fi
-
-# --------------------------------------------------
-# 2. 编译时加入需要的软件包
-# --------------------------------------------------
-echo "[2/5] 配置软件包 / BBR..."
+echo "配置软件包..."
 
 add_config() {
     local cfg="$1"
@@ -70,9 +58,16 @@ else
     echo " - luci-theme-argon 未找到，跳过" 
 fi
 
+# LuCI 中文 
+if grep -Rqs 'Package/luci-i18n-base-zh-cn' package feeds 2>/dev/null; then 
+	add_config "CONFIG_PACKAGE_luci-i18n-base-zh-cn=y" 
+	echo " + luci-i18n-base-zh-cn" 
+else 
+	echo " - luci-i18n-base-zh-cn 未找到，跳过" 
+fi
+
 # BBR
-if grep -Rqs 'config PACKAGE_kmod-tcp-bbr' package feeds 2>/dev/null ||
-   grep -Rqs 'Package/kmod-tcp-bbr' package feeds 2>/dev/null; then
+if grep -Rqs 'config PACKAGE_kmod-tcp-bbr' package feeds 2>/dev/null || grep -Rqs 'Package/kmod-tcp-bbr' package feeds 2>/dev/null; then
     
     add_config "CONFIG_PACKAGE_kmod-tcp-bbr=y"
     echo "  + kmod-tcp-bbr"
@@ -84,33 +79,32 @@ fi
 make defconfig
 
 # --------------------------------------------------
-# 3. 创建首次启动配置
+# 2. 创建首次启动配置
 # --------------------------------------------------
-echo "[3/5] 创建首次启动配置..."
+echo "创建首次启动配置..."
 
 mkdir -p package/base-files/files/etc/uci-defaults
 mkdir -p package/base-files/files/etc/sysctl.d
 mkdir -p package/base-files/files/etc/modules.d
 
-# -------------------------------------------------- 
-# BBR：启动时尝试加载模块 
-# -------------------------------------------------- 
-cat <<'EOF' > package/base-files/files/etc/modules.d/99-bbr 
-tcp_bbr 
-EOF
-
-# -------------------------------------------------- 
-# 首次启动配置 
-# --------------------------------------------------
 cat <<'FIRSTBOOT' > package/base-files/files/etc/uci-defaults/99-custom-settings
 
 #!/bin/sh
 #
-# Redmi AX6000 / ImmortalWrt 首次启动配置
+# Redmi AX6000 ImmortalWrt 首次启动配置
 #
 
+# ================================================== 
+# 基础系统 
+# ================================================== 
+uci set system.@system[0].hostname=Redmi-AX6000 
+uci set system.@system[0].timezone=CST-8 
+uci set system.@system[0].zonename=Asia/Shanghai 
+
+uci commit system
+
 # ==================================================
-# 1. WiFi：自动识别 2.4G / 5G radio
+# WiFi：自动识别 2.4G / 5G radio
 # ==================================================
 find_radio_by_band() {
     local target_band="$1"
@@ -234,97 +228,102 @@ fi
 uci commit wireless
 
 # ==================================================
-# 2. BBR + fq
+# BBR + fq
 # ==================================================
 BBR_AVAILABLE=0
 
 if command -v sysctl >/dev/null 2>&1; then
+    BBR_AVAILABLE=0 
+    FQ_AVAILABLE=0
+    
+    # 尝试加载 BBR。
     if command -v modprobe >/dev/null 2>&1; then
         modprobe tcp_bbr 2>/dev/null || true
     fi
 
+    # BBR
     if sysctl net.ipv4.tcp_allowed_congestion_control 2>/dev/null | grep -qw bbr; then
         BBR_AVAILABLE=1
         
         sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true 
-        
-        sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true 
-        
-        cat > /etc/sysctl.d/99-bbr.conf <<'EOF' 
-        net.ipv4.tcp_congestion_control=bbr 
-        net.core.default_qdisc=fq 
-        EOF
-        
-        echo "  BBR: enabled"
+    fi
+
+    if [ -e /sys/class/net/lo/queues/tx-0/tx_maxrate ] || grep -qw fq /proc/sys/net/core/default_qdisc 2>/dev/null || command -v tc >/dev/null 2>&1 && tc qdisc add dev lo root fq 2>/dev/null; then
+        FQ_AVAILABLE=1
+
+        # 清理测试 qdisc。
+        if command -v tc >/dev/null 2>&1; then
+            tc qdisc del dev lo root 2>/dev/null || true
+        fi
+
+        sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
+    fi
+
+    # 持久化
+    if [ "$BBR_AVAILABLE" = "1" ]; then
+        {
+            echo "net.ipv4.tcp_congestion_control=bbr"
+            if [ "$FQ_AVAILABLE" = "1" ]; then
+                echo "net.core.default_qdisc=fq"
+            fi
+        } > /etc/sysctl.d/99-bbr.conf
+
+        echo " BBR: enabled"
+
+        if [ "$FQ_AVAILABLE" = "1" ]; then
+            echo " fq : enabled"
+        else
+            echo " fq : unavailable"
+        fi
+
+        sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
+    
     else
-        echo "  BBR: unavailable"
+        echo " BBR: unavailable"
     fi
 fi
 
 # ==================================================
-# 3. Software Flow Offloading
+# Software Flow Offloading
 # ==================================================
 if uci -q show firewall.@defaults[0] >/dev/null 2>&1; then
+    # 软件流量分载。
     uci set firewall.@defaults[0].flow_offloading=1
+    # 明确关闭硬件流量分载。
     uci -q delete firewall.@defaults[0].flow_offloading_hw
+    
     uci commit firewall
 
     echo " Flow Offloading: software"
+
+    # 立即应用防火墙配置。 
+    /etc/init.d/firewall restart >/dev/null 2>&1 || true
 fi
 
 # ==================================================
-# 4. LuCI 中文 + 上海时区
+# LuCI 中文
 # ==================================================
 uci set luci.main.lang=zh_cn
 
-# 如果 Argon 已安装，则设置为默认主题 
+# Argon 已安装，则设置为默认主题 
 if [ -d /www/luci-static/argon ]; then 
     uci set luci.main.mediaurlbase=/luci-static/argon 
 fi
 
 uci commit luci
 
-uci set system.@system[0].timezone=CST-8
-uci set system.@system[0].zonename=Asia/Shanghai
-
-uci commit system
-
-# ==================================================
-# 应用配置
-# ==================================================
-if [ -f /etc/sysctl.d/99-bbr.conf ]; then
-    sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
-fi
-
-/etc/init.d/network restart >/dev/null 2>&1 || true
-wifi reload >/dev/null 2>&1 || true
-
 echo "Redmi AX6000 首次启动配置完成。"
+
 exit 0
 FIRSTBOOT
 
 chmod +x package/base-files/files/etc/uci-defaults/99-custom-settings
 
 # --------------------------------------------------
-# 4. 输出检查
+# 3. 输出检查
 # --------------------------------------------------
-echo "[4/5] 检查生成文件..."
+echo "检查生成文件..."
 test -x package/base-files/files/etc/uci-defaults/99-custom-settings
-test -f package/base-files/files/etc/modules.d/99-bbr
-
-# --------------------------------------------------
-# 5. 配置摘要
-# --------------------------------------------------
-echo "[5/5] 配置摘要..."
-echo "  Hostname        : Redmi-AX6000"
-echo "  LuCI             : Argon + 中文"
-echo "  Timezone         : Asia/Shanghai"
-echo "  WiFi country     : CN"
-echo "  2.4G             : HE40 / Auto / 23dBm / 11k/v"
-echo "  5G               : HE80 / 149 / 23dBm / 11k/v"
-echo "  U-APSD           : 关闭"
-echo "  BBR + fq         : 可用时启用"
-echo "  Flow Offloading  : Software"
 
 echo ""
 echo "=================================================="
