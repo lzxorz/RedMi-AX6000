@@ -238,6 +238,36 @@ fi
 
 uci commit luci
 
+
+# ==================================================
+# Tailscale Community APK Repository
+# ==================================================
+
+TAILSCALE_REPO="https://tokisaki-galaxy.github.io/luci-app-tailscale-community/all"
+TAILSCALE_KEY="/etc/apk/keys/luci-app-tailscale-community.pem"
+TAILSCALE_REPO_FILE="/etc/apk/repositories.d/luci-app-tailscale-community.list"
+
+if command -v apk >/dev/null 2>&1; then
+
+    mkdir -p /etc/apk/keys
+    mkdir -p /etc/apk/repositories.d
+
+    # 添加 APK 公钥
+	if [ ! -s "$TAILSCALE_KEY" ]; then
+        wget -q -O "$TAILSCALE_KEY" "${TAILSCALE_REPO}/public-key.pem"
+    fi
+
+    # 添加 APK 软件源
+	if [ -s "$TAILSCALE_KEY" ]; then
+        echo "$TAILSCALE_REPO" > "$TAILSCALE_REPO_FILE"
+        echo "  Tailscale Community APK repository: enabled"
+    else
+        echo "  Tailscale Community APK key: unavailable"
+    fi
+else
+    echo "  apk not found, skip Tailscale Community repository"
+fi
+
 echo "Redmi AX6000 首次启动配置完成。"
 
 exit 0
